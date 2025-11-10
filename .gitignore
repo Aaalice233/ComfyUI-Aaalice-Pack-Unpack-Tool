@@ -39,12 +39,11 @@ Thumbs.db
 temp/
 *.cpack.zip
 
-# Build artifacts
+# Build artifacts (but keep final exe)
 exe/build/
-exe/dist/
-exe/*.exe
 *.pkg
 *.toc
+temp/*.exe
 
 # Lock files (optional)
 uv.lock
