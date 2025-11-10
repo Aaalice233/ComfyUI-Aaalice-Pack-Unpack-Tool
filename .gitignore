@@ -47,3 +47,8 @@ temp/*.exe
 
 # Lock files (optional)
 uv.lock
+
+# Claude Code
+.spec-workflow/
+.claude/
+.serena/

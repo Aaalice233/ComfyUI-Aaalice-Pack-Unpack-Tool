@@ -1341,62 +1341,7 @@ def install_dependencies_to_existing(
     return True  # 总是返回 True，让解包继续
 
 
-def copy_input_files(
-    pack_dir: Path,
-    comfyui_dir: Path,
-    progress_callback: Optional[Callable[[int, int, str], None]] = None,
-    log_callback: Optional[Callable[[str], None]] = None
-) -> bool:
-    """复制 input 文件"""
-    source_input = pack_dir / "input"
-    target_input = comfyui_dir / "input"
-    
-    if not source_input.exists():
-        if log_callback:
-            log_callback("压缩包中没有 input 文件")
-        return True
-    
-    target_input.mkdir(exist_ok=True)
-    
-    # 收集所有文件
-    all_files = list(source_input.rglob("*"))
-    files_to_copy = [f for f in all_files if f.is_file()]
-    total = len(files_to_copy)
-    
-    if total == 0:
-        if log_callback:
-            log_callback("没有需要复制的 input 文件")
-        return True
-    
-    if log_callback:
-        log_callback(f"准备复制 {total} 个 input 文件...")
-    
-    for idx, file in enumerate(files_to_copy):
-        rel_path = file.relative_to(source_input)
-        target_file = target_input / rel_path
-        
-        if progress_callback:
-            progress_callback(idx, total, str(rel_path))
-        
-        try:
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(file, target_file)
-            
-            if log_callback:
-                log_callback(f"  复制: {rel_path}")
-        
-        except Exception as e:
-            if log_callback:
-                log_callback(f"  ✗ 复制失败 {rel_path}: {e}")
-            return False
-    
-    if progress_callback:
-        progress_callback(total, total, "完成")
-    
-    if log_callback:
-        log_callback("✓ 所有文件复制完成")
-    
-    return True
+# Input files are no longer handled
 
 
 def copy_workflow_files(
@@ -1522,7 +1467,8 @@ def unpack_to_existing_comfyui(
             return False
         
         # 检查并切换 ComfyUI 版本
-        target_commit = snapshot.get("comfyui_commit")
+        # 兼容两种字段名：comfyui_commit（新格式）和 comfyui（旧格式）
+        target_commit = snapshot.get("comfyui_commit") or snapshot.get("comfyui")
         if target_commit:
             if progress_callback:
                 progress_callback("检查 ComfyUI 版本", 7)
@@ -1556,6 +1502,7 @@ def unpack_to_existing_comfyui(
         else:
             if log_callback:
                 log_callback("  ⚠ 压缩包中未记录 ComfyUI 版本信息")
+                log_callback("  调试：snapshot 包含的键：" + str(list(snapshot.keys())[:10]))
         
         # 检查插件
         if progress_callback:
@@ -1597,21 +1544,11 @@ def unpack_to_existing_comfyui(
         ):
             return False
         
-        # 复制 input 文件
-        if progress_callback:
-            progress_callback("复制文件", 80)
-        
-        def file_progress(current, total, name):
-            if progress_callback:
-                pct = 80 + int((current / max(total, 1)) * 15)
-                progress_callback(f"复制文件: {name}", pct)
-        
-        if not copy_input_files(pack_dir, comfyui_dir, file_progress, log_callback):
-            return False
+        # Input files are no longer copied
         
         # 复制工作流文件
         if progress_callback:
-            progress_callback("复制工作流", 95)
+            progress_callback("复制工作流", 80)
         
         if not copy_workflow_files(pack_dir, comfyui_dir, cpack_path, log_callback):
             return False

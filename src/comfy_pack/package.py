@@ -460,11 +460,7 @@ def install(
             cwd=workspace,
         )
 
-        for f in (pack_dir / "input").glob("*"):
-            if f.is_file():
-                shutil.copy(f, workspace / "input" / f.name)
-            elif f.is_dir():
-                shutil.copytree(f, workspace / "input" / f.name, dirs_exist_ok=True)
+        # Input files are no longer packaged
         if prepare_models:
             retrieve_models(
                 snapshot,
