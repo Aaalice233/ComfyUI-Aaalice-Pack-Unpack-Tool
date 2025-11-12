@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import sys
 import tempfile
 import time
@@ -123,29 +122,6 @@ async def _write_completion_message(path: ZPath, data: dict) -> None:
             f.write(completion_message)
 
 
-async def _write_inputs(path: ZPath, data: dict) -> None:
-    print("Package => Writing inputs (自动处理所有文件)")
-    if isinstance(path, Path):
-        path.joinpath("input").mkdir(exist_ok=True)
-
-    input_dir = folder_paths.get_input_directory()
-
-    # 简化版：自动包含所有输入文件，无需用户选择
-    selected = None  # 不再过滤文件，包含所有文件
-
-    src_root = Path(input_dir).absolute()
-    for src in src_root.glob("**/*"):
-        rel = src.relative_to(src_root)
-        # 简化版：不再检查文件选择，直接包含所有文件
-        if src.is_dir():
-            if isinstance(path, Path):
-                path.joinpath("input").joinpath(rel).mkdir(parents=True, exist_ok=True)
-        if src.is_file():
-            with path.joinpath("input").joinpath(rel).open("wb") as f:
-                with open(src, "rb") as input_file:
-                    shutil.copyfileobj(input_file, f)
-
-
 @PromptServer.instance.routes.post("/bentoml/pack")
 async def pack_workspace(request):
     data = await request.json()
@@ -232,23 +208,12 @@ async def _prepare_pack(
     # Write completion message (if provided)
     await _write_completion_message(working_dir, data)
 
-    # Write inputs
-    if client_id:
-        await send_pack_progress(
-            client_id,
-            stage="writing_inputs",
-            message="正在复制输入文件...",
-            percentage=80,
-            level="info",
-        )
-    await _write_inputs(working_dir, data)
-
     # Simplified - skip model processing
     if client_id:
         await send_pack_progress(
             client_id,
             stage="finalizing",
             message="正在完成打包...",
-            percentage=95,
+            percentage=80,
             level="info",
         )
