@@ -1097,56 +1097,128 @@ def install_or_update_plugins(
                 if log_callback:
                     log_callback(f"  更新插件: {plugin_name}")
                     log_callback(f"    当前版本: {task['current']}")
-                    log_callback(f"    目标版本: {task['target']}")
-                    log_callback(f"    执行 fetch origin {task['target']}...")
+                    if not force_update:
+                        log_callback(f"    目标版本: {task['target']}")
+                        log_callback(f"    执行 fetch origin {task['target']}...")
+                    else:
+                        log_callback(f"    目标版本: 最新版本 (强制更新)")
+                        log_callback(f"    执行 git pull...")
                 
-                # Fetch 新的 commit
-                fetch_result = subprocess.run(
-                    [git_cmd, "fetch", "origin", task['target_full']],
-                    cwd=plugin_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
-                
-                if fetch_result.returncode != 0:
-                    error_msg = fetch_result.stderr or "fetch 失败"
-                    if log_callback:
-                        log_callback(f"    ✗ fetch 失败: {error_msg[:100]}")
-                    raise subprocess.CalledProcessError(
-                        fetch_result.returncode,
-                        fetch_result.args,
-                        stderr=error_msg
+                if force_update:
+                    # 强制更新到最新版本
+                    # 1. 先 fetch 最新代码
+                    fetch_result = subprocess.run(
+                        [git_cmd, "fetch", "origin"],
+                        cwd=plugin_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=60
                     )
-                
-                if log_callback:
-                    log_callback(f"    ✓ fetch 完成")
-                    log_callback(f"    执行 checkout...")
-                
-                # Checkout 到指定 commit
-                checkout_result = subprocess.run(
-                    [git_cmd, "checkout", task['target_full']],
-                    cwd=plugin_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-                
-                if checkout_result.returncode != 0:
-                    error_msg = checkout_result.stderr or "checkout 失败"
+                    
+                    if fetch_result.returncode != 0:
+                        error_msg = fetch_result.stderr or "fetch 失败"
+                        if log_callback:
+                            log_callback(f"    ✗ fetch 失败: {error_msg[:100]}")
+                        raise subprocess.CalledProcessError(
+                            fetch_result.returncode,
+                            fetch_result.args,
+                            stderr=error_msg
+                        )
+                    
+                    # 2. 切换到主分支
+                    main_branch = None
+                    for branch_name in ['main', 'master']:
+                        check_result = subprocess.run(
+                            [git_cmd, "rev-parse", "--verify", f"origin/{branch_name}"],
+                            cwd=plugin_dir,
+                            capture_output=True,
+                            timeout=5
+                        )
+                        if check_result.returncode == 0:
+                            main_branch = branch_name
+                            break
+                    
+                    if main_branch:
+                        # 3. checkout 到主分支
+                        checkout_result = subprocess.run(
+                            [git_cmd, "checkout", main_branch],
+                            cwd=plugin_dir,
+                            capture_output=True,
+                            text=True,
+                            timeout=30
+                        )
+                        
+                        if checkout_result.returncode == 0:
+                            # 4. reset 到远程最新版本
+                            reset_result = subprocess.run(
+                                [git_cmd, "reset", "--hard", f"origin/{main_branch}"],
+                                cwd=plugin_dir,
+                                capture_output=True,
+                                text=True,
+                                timeout=30
+                            )
+                            
+                            if reset_result.returncode == 0:
+                                if log_callback:
+                                    log_callback(f"    ✓ 已更新到 {main_branch} 分支最新版本")
+                            else:
+                                if log_callback:
+                                    log_callback(f"    ⚠ reset 失败")
+                        else:
+                            if log_callback:
+                                log_callback(f"    ⚠ checkout 失败")
+                    
                     if log_callback:
-                        log_callback(f"    ✗ checkout 失败: {error_msg[:100]}")
-                    raise subprocess.CalledProcessError(
-                        checkout_result.returncode,
-                        checkout_result.args,
-                        stderr=error_msg
+                        log_callback(f"    ✓ 强制更新完成")
+                else:
+                    # 正常更新到指定 commit
+                    # Fetch 新的 commit
+                    fetch_result = subprocess.run(
+                        [git_cmd, "fetch", "origin", task['target_full']],
+                        cwd=plugin_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=60
                     )
-                
-                if log_callback:
-                    log_callback(f"    ✓ checkout 成功")
-                
-                # 修复 detached HEAD 状态
-                fix_detached_head(plugin_dir, task['target_full'], git_cmd, log_callback)
+                    
+                    if fetch_result.returncode != 0:
+                        error_msg = fetch_result.stderr or "fetch 失败"
+                        if log_callback:
+                            log_callback(f"    ✗ fetch 失败: {error_msg[:100]}")
+                        raise subprocess.CalledProcessError(
+                            fetch_result.returncode,
+                            fetch_result.args,
+                            stderr=error_msg
+                        )
+                    
+                    if log_callback:
+                        log_callback(f"    ✓ fetch 完成")
+                        log_callback(f"    执行 checkout...")
+                    
+                    # Checkout 到指定 commit
+                    checkout_result = subprocess.run(
+                        [git_cmd, "checkout", task['target_full']],
+                        cwd=plugin_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if checkout_result.returncode != 0:
+                        error_msg = checkout_result.stderr or "checkout 失败"
+                        if log_callback:
+                            log_callback(f"    ✗ checkout 失败: {error_msg[:100]}")
+                        raise subprocess.CalledProcessError(
+                            checkout_result.returncode,
+                            checkout_result.args,
+                            stderr=error_msg
+                        )
+                    
+                    if log_callback:
+                        log_callback(f"    ✓ checkout 成功")
+                    
+                    # 修复 detached HEAD 状态
+                    fix_detached_head(plugin_dir, task['target_full'], git_cmd, log_callback)
             
             # 运行 install.py（如果存在）
             install_script = plugin_dir / "install.py"
