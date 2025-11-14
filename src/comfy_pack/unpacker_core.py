@@ -35,6 +35,19 @@ def run_subprocess(*args, **kwargs):
 subprocess.run = run_subprocess
 
 
+# 插件排除列表：这些插件不会被解包器处理（避免exe被占用导致异常）
+SKIP_UPDATE_PLUGINS = {
+    'ComfyUI-Aaalice-Pack-Unpack-Tool',  # 解包器自己
+    'comfy-pack-aaalice',  # 旧版解包器名称
+    'comfy-pack'  # 原版解包器名称
+}
+
+# 强制更新插件列表：这些插件会更新到最新版本而不是快照中的版本
+FORCE_UPDATE_PLUGINS = {
+    'ComfyUI-Danbooru-Gallery': 'https://github.com/Aaalice233/ComfyUI-Danbooru-Gallery'
+}
+
+
 class UnpackerError(Exception):
     """解包过程中的错误"""
     pass
@@ -506,10 +519,10 @@ def check_plugin_versions(
         normalized_url = normalize_url(url)
         plugin_name = url.split("/")[-1].replace(".git", "")
         
-        # 跳过解包器本身，避免自我更新导致的问题
-        if plugin_name.lower() in ['comfy-pack-aaalice', 'comfy-pack']:
+        # 跳过排除列表中的插件
+        if plugin_name in SKIP_UPDATE_PLUGINS:
             if log_callback:
-                log_callback(f"  ⊙ 跳过解包器本身: {plugin_name}")
+                log_callback(f"  ⊙ 跳过插件: {plugin_name}（在排除列表中）")
             continue
         
         target_commit = plugin.get("commit_hash", "").strip()
@@ -763,11 +776,6 @@ def install_or_update_plugins(
     # 确定使用哪个 Git
     git_cmd = str(git_exe) if git_exe else "git"
     
-    # 特殊处理：ComfyUI-Danbooru-Gallery 固定更新到最新版本
-    FORCE_UPDATE_PLUGINS = {
-        'ComfyUI-Danbooru-Gallery': 'https://github.com/Aaalice233/ComfyUI-Danbooru-Gallery'
-    }
-    
     # 记录结果
     success_plugins = []
     failed_plugins = []
@@ -775,6 +783,13 @@ def install_or_update_plugins(
     for idx, task in enumerate(all_tasks):
         plugin_name = task['name']
         plugin_dir = custom_nodes / plugin_name
+        
+        # 检查是否在排除列表中
+        if plugin_name in SKIP_UPDATE_PLUGINS:
+            if log_callback:
+                log_callback(f"⊙ 跳过插件: {plugin_name}（在排除列表中）")
+            success_plugins.append(plugin_name)
+            continue
         
         # 检查是否是需要强制更新的插件
         force_update = plugin_name in FORCE_UPDATE_PLUGINS
