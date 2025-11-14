@@ -763,6 +763,11 @@ def install_or_update_plugins(
     # 确定使用哪个 Git
     git_cmd = str(git_exe) if git_exe else "git"
     
+    # 特殊处理：ComfyUI-Danbooru-Gallery 固定更新到最新版本
+    FORCE_UPDATE_PLUGINS = {
+        'ComfyUI-Danbooru-Gallery': 'https://github.com/Aaalice233/ComfyUI-Danbooru-Gallery'
+    }
+    
     # 记录结果
     success_plugins = []
     failed_plugins = []
@@ -771,8 +776,13 @@ def install_or_update_plugins(
         plugin_name = task['name']
         plugin_dir = custom_nodes / plugin_name
         
+        # 检查是否是需要强制更新的插件
+        force_update = plugin_name in FORCE_UPDATE_PLUGINS
+        
         if log_callback:
             log_callback(f"处理插件: {plugin_name}")
+            if force_update:
+                log_callback(f"  ⚡ 检测到 {plugin_name}，将更新到最新版本")
         
         if progress_callback:
             progress_callback(idx, total, plugin_name)
