@@ -532,8 +532,11 @@ def check_plugin_versions(
             existing = url_to_installed[normalized_url]
             actual_name = existing['name']
             current_commit = existing['commit']
-            
-            if current_commit[:8] != target_commit[:8]:
+
+            # 检查是否是强制更新插件（即使版本一致也要更新）
+            force_update = actual_name in FORCE_UPDATE_PLUGINS
+
+            if current_commit[:8] != target_commit[:8] or force_update:
                 result['to_update'].append({
                     'name': actual_name,  # 使用实际的目录名
                     'url': url,
