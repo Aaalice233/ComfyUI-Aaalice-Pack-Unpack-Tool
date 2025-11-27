@@ -26,7 +26,8 @@ def run_subprocess(*args, **kwargs):
     """
     运行 subprocess，自动添加 Windows 下的隐藏窗口标志
     """
-    if 'creationflags' not in kwargs:
+    # 只在 Windows 上添加 creationflags 参数
+    if sys.platform == 'win32' and 'creationflags' not in kwargs:
         kwargs['creationflags'] = SUBPROCESS_FLAGS
     return _original_subprocess_run(*args, **kwargs)
 
@@ -166,7 +167,9 @@ def detect_python_environments(comfyui_dir: Path, log_callback=None) -> List[Pat
     
     log(f"开始检测 Python（ComfyUI: {comfyui_dir}）")
     log(f"父目录: {parent_dir}")
-    
+
+    is_windows = sys.platform == 'win32'
+
     # 1. 检查 ComfyUI 同级的 python 目录（最优先）
     log("1. 检查同级 python 目录...")
     sibling_python_dirs = ["python", "Python", "python_embeded"]
@@ -176,13 +179,21 @@ def detect_python_environments(comfyui_dir: Path, log_callback=None) -> List[Pat
         if not sibling_path.exists():
             log(f"    ✗ 目录不存在")
             continue
-        
-        log(f"    ✓ 目录存在，检查 python.exe...")
-        # Windows - 直接在目录下
-        add_if_valid(sibling_path / "python.exe")
-        # Windows - Scripts 目录
-        add_if_valid(sibling_path / "Scripts" / "python.exe")
-    
+
+        log(f"    ✓ 目录存在，检查 Python 可执行文件...")
+        if is_windows:
+            # Windows - 直接在目录下
+            add_if_valid(sibling_path / "python.exe")
+            # Windows - Scripts 目录
+            add_if_valid(sibling_path / "Scripts" / "python.exe")
+        else:
+            # Linux - bin 目录
+            add_if_valid(sibling_path / "bin" / "python3")
+            add_if_valid(sibling_path / "bin" / "python")
+            # Linux - 直接在目录下（某些嵌入式 Python）
+            add_if_valid(sibling_path / "python3")
+            add_if_valid(sibling_path / "python")
+
     # 2. 检查 ComfyUI 内部的虚拟环境
     log("2. 检查 ComfyUI 内部虚拟环境...")
     venv_locations = [".venv", "venv", "python_embeded", "python"]
@@ -190,33 +201,52 @@ def detect_python_environments(comfyui_dir: Path, log_callback=None) -> List[Pat
         venv_path = comfyui_dir / venv_name
         if not venv_path.exists():
             continue
-            
+
         log(f"  找到虚拟环境目录: {venv_path}")
-        # Windows - Scripts
-        if add_if_valid(venv_path / "Scripts" / "python.exe"):
-            continue
-        # Linux/Mac - bin
-        if add_if_valid(venv_path / "bin" / "python"):
-            continue
-        # Embedded Python
-        add_if_valid(venv_path / "python.exe")
-    
-    # 3. 检查全局 Python（最后选择，仅限 Windows）
-    if os.name == "nt" and len(python_paths) == 0:
+        if is_windows:
+            # Windows - Scripts
+            if add_if_valid(venv_path / "Scripts" / "python.exe"):
+                continue
+            # Embedded Python
+            add_if_valid(venv_path / "python.exe")
+        else:
+            # Linux/Mac - bin
+            if add_if_valid(venv_path / "bin" / "python3"):
+                continue
+            if add_if_valid(venv_path / "bin" / "python"):
+                continue
+
+    # 3. 检查全局 Python（最后选择）
+    if len(python_paths) == 0:
         log("3. 检查全局 Python...")
         try:
-            result = subprocess.run(
-                ["where", "python"],
-                capture_output=True,
-                text=True,
-                timeout=3
-            )
-            if result.returncode == 0:
-                for line in result.stdout.strip().split("\n"):
-                    py_path = Path(line.strip())
-                    add_if_valid(py_path)
-                    if len(python_paths) >= 2:  # 最多添加2个全局Python
-                        break
+            if is_windows:
+                result = subprocess.run(
+                    ["where", "python"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split("\n"):
+                        py_path = Path(line.strip())
+                        add_if_valid(py_path)
+                        if len(python_paths) >= 2:  # 最多添加2个全局Python
+                            break
+            else:
+                # Linux - 优先查找 python3
+                for py_cmd in ["python3", "python"]:
+                    result = subprocess.run(
+                        ["which", py_cmd],
+                        capture_output=True,
+                        text=True,
+                        timeout=3
+                    )
+                    if result.returncode == 0:
+                        py_path = Path(result.stdout.strip())
+                        add_if_valid(py_path)
+                        if len(python_paths) >= 2:
+                            break
         except Exception as e:
             log(f"  检查全局 Python 失败: {e}")
     
@@ -229,25 +259,32 @@ def detect_git_executable(comfyui_dir: Path) -> Optional[Path]:
     """
     检测 Git 可执行文件
     优先从 ComfyUI 同级目录查找，然后是全局
-    
+
     Returns:
         Git 可执行文件路径，如果未找到返回 None
     """
     parent_dir = comfyui_dir.parent
-    
+    is_windows = sys.platform == 'win32'
+
     # 1. 检查 ComfyUI 同级的 git 目录（最优先）
     sibling_git_dirs = ["git", "Git", "PortableGit"]
     for dirname in sibling_git_dirs:
         sibling_path = parent_dir / dirname
         if not sibling_path.exists():
             continue
-            
-        # Windows: git/bin/git.exe 或 git/cmd/git.exe
-        for subdir in ["cmd", "bin"]:  # cmd 优先，通常更稳定
-            git_exe = sibling_path / subdir / "git.exe"
-            if git_exe.exists():
-                # 快速检查文件是否可执行（不运行验证以提高速度）
-                return git_exe
+
+        if is_windows:
+            # Windows: git/cmd/git.exe 或 git/bin/git.exe
+            for subdir in ["cmd", "bin"]:  # cmd 优先，通常更稳定
+                git_exe = sibling_path / subdir / "git.exe"
+                if git_exe.exists():
+                    return git_exe
+        else:
+            # Linux: git/bin/git
+            for subdir in ["bin", "cmd"]:
+                git_exe = sibling_path / subdir / "git"
+                if git_exe.exists():
+                    return git_exe
     
     # 2. 检查全局 Git
     try:

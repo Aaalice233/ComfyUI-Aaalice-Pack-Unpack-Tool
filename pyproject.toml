@@ -26,6 +26,7 @@ Homepage = "https://github.com/Aaalice233/ComfyUI-Aaalice-Pack-Unpack-Tool"
 
 [project.scripts]
 comfy-pack = "comfy_pack.cli:main"
+comfy-unpack = "comfy_pack.unpacker_cli:main"
 
 [build-system]
 requires = ["pdm-backend"]

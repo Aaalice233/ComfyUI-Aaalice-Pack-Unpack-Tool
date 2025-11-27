@@ -75,6 +75,8 @@ You can package a workflow and the custom nodes required to run the workflow int
 
 ### Unpack the ComfyUI environments / 解包 ComfyUI 环境
 
+#### Windows
+
 Unpacking is done through the provided executable file for simple setup.
 
 解包通过提供的可执行文件进行，操作简单。
@@ -82,6 +84,35 @@ Unpacking is done through the provided executable file for simple setup.
 1. Run the provided executable file (included in the package)
 2. Select your `.cpack.zip` file
 3. The executable will automatically set up the ComfyUI environment with required custom nodes
+
+#### Linux
+
+On Linux, use the command-line tool to unpack workflows.
+
+在 Linux 上，使用命令行工具解包工作流。
+
+```bash
+# Method 1: Run as module / 方式 1：作为模块运行
+cd ComfyUI/custom_nodes/ComfyUI-Aaalice-Pack-Unpack-Tool
+python -m comfy_pack.unpacker_cli workflow.cpack.zip --comfyui /path/to/ComfyUI
+
+# Method 2: Install and use command / 方式 2：安装后使用命令
+pip install -e .
+comfy-unpack workflow.cpack.zip --comfyui /path/to/ComfyUI
+
+# With manual Python and Git paths / 手动指定 Python 和 Git 路径
+comfy-unpack workflow.cpack.zip --comfyui /path/to/ComfyUI \
+    --python /usr/bin/python3 --git /usr/bin/git
+
+# Verbose output / 详细输出
+comfy-unpack workflow.cpack.zip --comfyui /path/to/ComfyUI -v
+```
+
+**CLI Options / CLI 选项:**
+- `--comfyui, -c` : ComfyUI root directory (required) / ComfyUI 根目录（必需）
+- `--python, -p` : Python executable path (optional, auto-detect) / Python 路径（可选，自动检测）
+- `--git, -g` : Git executable path (optional, auto-detect) / Git 路径（可选，自动检测）
+- `--verbose, -v` : Show detailed output / 显示详细输出
 
 ## Important Notes / 重要说明
 
