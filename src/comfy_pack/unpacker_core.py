@@ -47,6 +47,81 @@ FORCE_UPDATE_PLUGINS = {
     'ComfyUI-Danbooru-Gallery': 'https://github.com/Aaalice233/ComfyUI-Danbooru-Gallery'
 }
 
+# 网络错误关键词（用于检测 Git 操作是否因网络问题失败）
+NETWORK_ERROR_KEYWORDS = [
+    'Could not resolve host',
+    'unable to access',
+    'Connection refused',
+    'Connection timed out',
+    'Network is unreachable',
+    'Failed to connect',
+    'Temporary failure in name resolution',
+    'getaddrinfo',
+    'SSL certificate problem',
+    'Connection reset by peer',
+    'Operation timed out',
+]
+
+
+def check_github_connection(timeout: int = 10) -> Tuple[bool, str]:
+    """
+    检查是否能连接到 GitHub
+
+    Returns:
+        (是否可连接, 错误信息)
+    """
+    import socket
+    import urllib.request
+    import urllib.error
+
+    test_urls = [
+        ('github.com', 443),
+        ('raw.githubusercontent.com', 443),
+    ]
+
+    # 先尝试 socket 连接
+    for host, port in test_urls:
+        try:
+            socket.setdefaulttimeout(timeout)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            if result == 0:
+                return True, ""
+        except socket.gaierror:
+            return False, f"无法解析域名 {host}"
+        except socket.timeout:
+            return False, f"连接 {host} 超时"
+        except Exception as e:
+            continue
+
+    # 如果 socket 都失败，尝试 HTTP 请求
+    try:
+        req = urllib.request.Request(
+            'https://github.com',
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        urllib.request.urlopen(req, timeout=timeout)
+        return True, ""
+    except urllib.error.URLError as e:
+        return False, f"网络请求失败: {e.reason}"
+    except Exception as e:
+        return False, f"网络异常: {str(e)}"
+
+
+def is_network_error(error_message: str) -> bool:
+    """
+    检测错误信息是否是网络相关错误
+    """
+    if not error_message:
+        return False
+    error_lower = error_message.lower()
+    for keyword in NETWORK_ERROR_KEYWORDS:
+        if keyword.lower() in error_lower:
+            return True
+    return False
+
 
 class UnpackerError(Exception):
     """解包过程中的错误"""
@@ -986,20 +1061,61 @@ def install_or_update_plugins(
                                     if result.returncode == 0:
                                         if log_callback:
                                             log_callback(f"    ✓ checkout 成功！")
-                                        
+
                                         # 修复 detached HEAD 状态
                                         fix_detached_head(plugin_dir, task['commit'], git_cmd, log_callback)
                                     else:
-                                        error_msg = result.stderr or "无法切换到指定版本"
+                                        # 所有策略都失败了，尝试回退到最新版本
                                         if log_callback:
                                             log_callback(f"    ✗ 所有策略都失败了")
-                                            log_callback(f"    错误详情: {error_msg[:150]}")
                                             log_callback(f"    可能原因: commit {task['commit'][:8]} 不存在或已被删除")
-                                        raise subprocess.CalledProcessError(
-                                            result.returncode,
-                                            result.args,
-                                            stderr=error_msg
-                                        )
+                                            log_callback(f"    [回退策略] 尝试更新到最新版本...")
+
+                                        # 尝试更新到主分支最新版本
+                                        main_branch = None
+                                        for branch_name in ['main', 'master']:
+                                            check_result = subprocess.run(
+                                                [git_cmd, "rev-parse", "--verify", f"origin/{branch_name}"],
+                                                cwd=plugin_dir,
+                                                capture_output=True,
+                                                timeout=5
+                                            )
+                                            if check_result.returncode == 0:
+                                                main_branch = branch_name
+                                                break
+
+                                        if main_branch:
+                                            # checkout 到主分支
+                                            checkout_main = subprocess.run(
+                                                [git_cmd, "checkout", main_branch],
+                                                cwd=plugin_dir,
+                                                capture_output=True,
+                                                text=True,
+                                                timeout=30
+                                            )
+
+                                            if checkout_main.returncode == 0:
+                                                # reset 到远程最新版本
+                                                reset_result = subprocess.run(
+                                                    [git_cmd, "reset", "--hard", f"origin/{main_branch}"],
+                                                    cwd=plugin_dir,
+                                                    capture_output=True,
+                                                    text=True,
+                                                    timeout=30
+                                                )
+
+                                                if reset_result.returncode == 0:
+                                                    if log_callback:
+                                                        log_callback(f"    ✓ 已回退到 {main_branch} 分支最新版本")
+                                                else:
+                                                    if log_callback:
+                                                        log_callback(f"    ⚠ reset 失败，但插件可能仍可用")
+                                            else:
+                                                if log_callback:
+                                                    log_callback(f"    ⚠ checkout {main_branch} 失败，但插件可能仍可用")
+                                        else:
+                                            if log_callback:
+                                                log_callback(f"    ⚠ 未找到主分支，但插件可能仍可用")
                     else:
                         # 目录存在但不是 Git 仓库 → 可能是损坏的，删除后重新克隆
                         if log_callback:
@@ -1283,15 +1399,32 @@ def install_or_update_plugins(
             failed_plugins.append({'name': plugin_name, 'reason': '操作超时'})
             continue  # 继续处理下一个插件
         except subprocess.CalledProcessError as e:
+            error_msg = ""
+            if hasattr(e, 'stderr') and e.stderr:
+                error_msg = e.stderr
+            elif hasattr(e, 'stdout') and e.stdout:
+                error_msg = e.stdout
+
             if log_callback:
                 log_callback(f"  ✗ {plugin_name} Git 操作失败")
                 log_callback(f"    命令: {' '.join(e.cmd) if hasattr(e, 'cmd') else 'N/A'}")
                 log_callback(f"    返回码: {e.returncode}")
-                if hasattr(e, 'stderr') and e.stderr:
-                    log_callback(f"    错误信息: {e.stderr[:200]}")
-                if hasattr(e, 'stdout') and e.stdout:
-                    log_callback(f"    输出信息: {e.stdout[:200]}")
+                if error_msg:
+                    log_callback(f"    错误信息: {error_msg[:200]}")
+
+                # 检测是否是网络相关错误
+                if is_network_error(error_msg):
+                    log_callback(f"    ⚠ 检测到网络环境异常")
+                    log_callback(f"    提示: 请检查网络连接，或尝试打开代理的 TUN 模式")
+
             failed_plugins.append({'name': plugin_name, 'reason': f'Git 错误 (exit {e.returncode})'})
+            continue  # 继续处理下一个插件
+        except PermissionError as e:
+            if log_callback:
+                log_callback(f"  ✗ {plugin_name} 文件被占用")
+                log_callback(f"    错误详情: {str(e)[:200]}")
+                log_callback(f"    提示: 请确保没有其他程序正在使用该插件目录")
+            failed_plugins.append({'name': plugin_name, 'reason': '文件被占用，无法操作'})
             continue  # 继续处理下一个插件
         except Exception as e:
             if log_callback:
@@ -1533,7 +1666,23 @@ def unpack_to_existing_comfyui(
         log_callback(f"目标目录: {comfyui_dir}")
         log_callback(f"Python: {python_exe}")
         log_callback("=" * 50)
-    
+
+    # 检查网络连接
+    if log_callback:
+        log_callback("正在检查网络环境...")
+
+    network_ok, network_error = check_github_connection(timeout=10)
+    if not network_ok:
+        if log_callback:
+            log_callback("⚠ 网络环境异常，无法连接到 GitHub")
+            log_callback(f"  错误详情: {network_error}")
+            log_callback("  提示: 请检查网络连接，或尝试打开代理的 TUN 模式")
+            log_callback("")
+        # 不直接返回失败，继续尝试解包（可能部分操作不需要网络）
+    else:
+        if log_callback:
+            log_callback("✓ 网络环境正常")
+
     # 解压到临时目录
     with tempfile.TemporaryDirectory() as temp_dir:
         pack_dir = Path(temp_dir)
