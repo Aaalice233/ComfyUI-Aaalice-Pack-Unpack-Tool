@@ -69,26 +69,60 @@ def get_snapshot_path() -> Path | None:
 
 
 async def _save_snapshot() -> dict[str, Any]:
-    save_snapshot_route = next(
-        (
-            route
-            for route in PromptServer.instance.routes
-            if route.path == "/snapshot/save"
-        ),
-        None,
-    )
-    if not save_snapshot_route:
-        raise RuntimeError("ComfyUI-Manager must be installed to save snapshot")
-
     snapshot_path = get_snapshot_path()
     # Ensure the snapshot directory exists
     snapshot_path.mkdir(parents=True, exist_ok=True)
 
+    # Try to use ComfyUI-Manager's snapshot functionality directly
     try:
-        await save_snapshot_route.handler(None)
+        # Import ComfyUI-Manager's snapshot module directly
+        import importlib.util
+        manager_path = Path(folder_paths.get_folder_paths("custom_nodes")[0]) / "ComfyUI-Manager"
+
+        if manager_path.exists():
+            # Try to import and call the snapshot save function
+            snapshot_module_path = manager_path / "glob" / "manager_core.py"
+            if not snapshot_module_path.exists():
+                snapshot_module_path = manager_path / "manager_core.py"
+
+            if snapshot_module_path.exists():
+                spec = importlib.util.spec_from_file_location("manager_core", snapshot_module_path)
+                manager_core = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(manager_core)
+
+                if hasattr(manager_core, 'save_snapshot'):
+                    await manager_core.save_snapshot()
+                    print("[Comfy-Pack] Snapshot saved via ComfyUI-Manager")
     except Exception as e:
-        print(f"[Comfy-Pack] Snapshot save handler error: {e}")
-        # Continue anyway, try to find existing snapshot
+        print(f"[Comfy-Pack] Direct snapshot save failed: {e}")
+
+    # Fallback: Try the route handler with a mock request
+    if not list(snapshot_path.glob("*.json")):
+        try:
+            save_snapshot_route = next(
+                (
+                    route
+                    for route in PromptServer.instance.routes
+                    if route.path == "/snapshot/save"
+                ),
+                None,
+            )
+            if save_snapshot_route:
+                # Create a minimal mock request
+                from aiohttp.test_utils import make_mocked_request
+                mock_request = make_mocked_request("GET", "/snapshot/save")
+                await save_snapshot_route.handler(mock_request)
+                print("[Comfy-Pack] Snapshot saved via route handler")
+        except Exception as e:
+            print(f"[Comfy-Pack] Route handler snapshot save failed: {e}")
+
+    # Final fallback: Generate basic snapshot ourselves
+    if not list(snapshot_path.glob("*.json")):
+        try:
+            await _generate_basic_snapshot(snapshot_path)
+            print("[Comfy-Pack] Generated basic snapshot")
+        except Exception as e:
+            print(f"[Comfy-Pack] Basic snapshot generation failed: {e}")
 
     if not snapshot_path.exists():
         raise RuntimeError(f"Snapshot directory does not exist: {snapshot_path}")
@@ -97,9 +131,64 @@ async def _save_snapshot() -> dict[str, Any]:
         snapshot_path.glob("*.json"), key=lambda x: x.stat().st_mtime, default=None
     )
     if not most_recent:
-        raise RuntimeError(f"No snapshot files found in {snapshot_path}. Please save a snapshot manually via ComfyUI-Manager first.")
+        raise RuntimeError(f"No snapshot files found in {snapshot_path}. Please check ComfyUI-Manager installation.")
     with most_recent.open("r") as f:
         return json.load(f)
+
+
+async def _generate_basic_snapshot(snapshot_path: Path) -> None:
+    """Generate a basic snapshot with installed custom nodes info."""
+    import datetime
+
+    custom_nodes_path = Path(folder_paths.get_folder_paths("custom_nodes")[0])
+    custom_nodes = {}
+
+    for node_dir in custom_nodes_path.iterdir():
+        if node_dir.is_dir() and not node_dir.name.startswith('.'):
+            git_dir = node_dir / ".git"
+            if git_dir.exists():
+                # Try to get git info
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=str(node_dir),
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    commit_hash = result.stdout.strip() if result.returncode == 0 else "unknown"
+
+                    result = subprocess.run(
+                        ["git", "config", "--get", "remote.origin.url"],
+                        cwd=str(node_dir),
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    remote_url = result.stdout.strip() if result.returncode == 0 else ""
+
+                    custom_nodes[remote_url or node_dir.name] = {
+                        "hash": commit_hash,
+                        "disabled": False
+                    }
+                except Exception:
+                    custom_nodes[node_dir.name] = {
+                        "hash": "unknown",
+                        "disabled": False
+                    }
+
+    snapshot = {
+        "comfyui": "unknown",
+        "git_custom_nodes": custom_nodes,
+        "file_custom_nodes": [],
+        "pips": []
+    }
+
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    snapshot_file = snapshot_path / f"{timestamp}.json"
+    with open(snapshot_file, "w") as f:
+        json.dump(snapshot, f, indent=2)
 
 
 async def _write_snapshot(path: ZPath, data: dict) -> None:
