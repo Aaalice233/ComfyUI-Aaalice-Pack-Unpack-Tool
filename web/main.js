@@ -356,7 +356,14 @@ async function packageAction() {
       headers: { "Content-Type": "application/json" }
     });
 
-    const downloadUrl = (await resp.json())["download_url"];
+    const respData = await resp.json();
+
+    // Check for error response
+    if (respData.error) {
+      throw new Error(respData.error);
+    }
+
+    const downloadUrl = respData["download_url"];
 
     downloadModal.addLog("打包完成！开始下载...", "success");
     const link = document.createElement("a");

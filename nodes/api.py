@@ -79,16 +79,25 @@ async def _save_snapshot() -> dict[str, Any]:
     )
     if not save_snapshot_route:
         raise RuntimeError("ComfyUI-Manager must be installed to save snapshot")
-    await save_snapshot_route.handler(None)
+
     snapshot_path = get_snapshot_path()
+    # Ensure the snapshot directory exists
+    snapshot_path.mkdir(parents=True, exist_ok=True)
+
+    try:
+        await save_snapshot_route.handler(None)
+    except Exception as e:
+        print(f"[Comfy-Pack] Snapshot save handler error: {e}")
+        # Continue anyway, try to find existing snapshot
+
     if not snapshot_path.exists():
-        raise RuntimeError("Snapshot save failed")
+        raise RuntimeError(f"Snapshot directory does not exist: {snapshot_path}")
 
     most_recent = max(
         snapshot_path.glob("*.json"), key=lambda x: x.stat().st_mtime, default=None
     )
     if not most_recent:
-        raise RuntimeError("Snapshot save failed")
+        raise RuntimeError(f"No snapshot files found in {snapshot_path}. Please save a snapshot manually via ComfyUI-Manager first.")
     with most_recent.open("r") as f:
         return json.load(f)
 
@@ -124,50 +133,67 @@ async def _write_completion_message(path: ZPath, data: dict) -> None:
 
 @PromptServer.instance.routes.post("/bentoml/pack")
 async def pack_workspace(request):
-    data = await request.json()
-    client_id = data.get("client_id", "")
+    try:
+        data = await request.json()
+        client_id = data.get("client_id", "")
+    except Exception as e:
+        return web.json_response({"error": f"Invalid request: {str(e)}"}, status=400)
 
-    # Send initial progress
-    if client_id:
-        await send_pack_progress(
-            client_id,
-            stage="preparing",
-            message="开始准备打包...",
-            percentage=5,
-            level="info",
-        )
+    try:
+        # Send initial progress
+        if client_id:
+            await send_pack_progress(
+                client_id,
+                stage="preparing",
+                message="开始准备打包...",
+                percentage=5,
+                level="info",
+            )
 
-    TEMP_FOLDER.mkdir(exist_ok=True)
-    older_than_1h = time.time() - 60 * 60
-    for file in TEMP_FOLDER.iterdir():
-        if file.is_file() and file.stat().st_ctime < older_than_1h:
-            file.unlink()
+        TEMP_FOLDER.mkdir(exist_ok=True)
+        older_than_1h = time.time() - 60 * 60
+        for file in TEMP_FOLDER.iterdir():
+            if file.is_file() and file.stat().st_ctime < older_than_1h:
+                file.unlink()
 
-    # 使用用户指定的文件名，如果没有则使用uuid
-    user_filename = data.get("filename", "").strip()
-    if user_filename:
-        # 清理文件名，移除非法字符
-        import re
-        safe_filename = re.sub(r'[<>:"/\\|?*]', '_', user_filename)
-        zip_filename = f"{safe_filename}.cpack.zip"
-    else:
-        zip_filename = f"{uuid.uuid4()}.zip"
+        # 使用用户指定的文件名，如果没有则使用uuid
+        user_filename = data.get("filename", "").strip()
+        if user_filename:
+            # 清理文件名，移除非法字符
+            import re
+            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', user_filename)
+            zip_filename = f"{safe_filename}.cpack.zip"
+        else:
+            zip_filename = f"{uuid.uuid4()}.zip"
 
-    with zipfile.ZipFile(TEMP_FOLDER / zip_filename, "w") as zf:
-        path = zipfile.Path(zf)
-        await _prepare_pack(path, data, client_id=client_id)
+        with zipfile.ZipFile(TEMP_FOLDER / zip_filename, "w") as zf:
+            path = zipfile.Path(zf)
+            await _prepare_pack(path, data, client_id=client_id)
 
-    # Send completion progress
-    if client_id:
-        await send_pack_progress(
-            client_id,
-            stage="completed",
-            message="打包完成！",
-            percentage=100,
-            level="success",
-        )
+        # Send completion progress
+        if client_id:
+            await send_pack_progress(
+                client_id,
+                stage="completed",
+                message="打包完成！",
+                percentage=100,
+                level="success",
+            )
 
-    return web.json_response({"download_url": f"/bentoml/download/{zip_filename}"})
+        return web.json_response({"download_url": f"/bentoml/download/{zip_filename}"})
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[Comfy-Pack] Pack error: {error_msg}")
+        if client_id:
+            await send_pack_progress(
+                client_id,
+                stage="error",
+                message=f"打包失败: {error_msg}",
+                percentage=0,
+                level="error",
+            )
+        return web.json_response({"error": error_msg}, status=500)
 
 
 @PromptServer.instance.routes.get("/bentoml/download/{zip_filename}")
