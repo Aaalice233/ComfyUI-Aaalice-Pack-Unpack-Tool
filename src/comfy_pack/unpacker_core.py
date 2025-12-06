@@ -696,13 +696,18 @@ def check_dependencies(
     
     installed = get_installed_packages(python_exe)
     required = snapshot.get("pips", {})
-    
+
     result = {
         'to_install': [],
         'to_update': [],
         'ok': []
     }
-    
+
+    # 兼容列表格式的 pips（旧版快照）
+    if isinstance(required, list):
+        # 转换列表为字典格式
+        required = {item: {} for item in required} if required else {}
+
     for package_spec, version_info in required.items():
         # package_spec 格式: "package==version" 或 "package"
         if "==" in package_spec:

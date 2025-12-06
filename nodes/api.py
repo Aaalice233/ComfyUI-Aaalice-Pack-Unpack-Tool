@@ -69,69 +69,72 @@ def get_snapshot_path() -> Path | None:
 
 
 async def _save_snapshot() -> dict[str, Any]:
+    """
+    获取当前环境的快照信息。
+    优先使用已有的有效快照文件，没有才调用 ComfyUI-Manager 生成。
+    """
     snapshot_path = get_snapshot_path()
-    # Ensure the snapshot directory exists
     snapshot_path.mkdir(parents=True, exist_ok=True)
 
-    # Try to use ComfyUI-Manager's snapshot functionality directly
+    # 方法1: 检测已有的有效快照文件
+    most_recent = max(
+        snapshot_path.glob("*.json"), key=lambda x: x.stat().st_mtime, default=None
+    )
+    if most_recent:
+        try:
+            with most_recent.open("r") as f:
+                snapshot = json.load(f)
+            # 验证快照是否有效（包含必要字段且 pips 不是空列表）
+            pips = snapshot.get("pips")
+            if snapshot.get("git_custom_nodes") and pips and isinstance(pips, dict):
+                print(f"[Comfy-Pack] Using existing valid snapshot: {most_recent.name}")
+                return snapshot
+            else:
+                print(f"[Comfy-Pack] Existing snapshot invalid or incomplete, generating new one...")
+        except Exception as e:
+            print(f"[Comfy-Pack] Failed to read existing snapshot: {e}")
+
+    # 方法2: 调用 ComfyUI-Manager 的 get_current_snapshot 函数
     try:
-        # Import ComfyUI-Manager's snapshot module directly
-        import importlib.util
-        manager_path = Path(folder_paths.get_folder_paths("custom_nodes")[0]) / "ComfyUI-Manager"
-
-        if manager_path.exists():
-            # Try to import and call the snapshot save function
-            snapshot_module_path = manager_path / "glob" / "manager_core.py"
-            if not snapshot_module_path.exists():
-                snapshot_module_path = manager_path / "manager_core.py"
-
-            if snapshot_module_path.exists():
-                spec = importlib.util.spec_from_file_location("manager_core", snapshot_module_path)
-                manager_core = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(manager_core)
-
-                if hasattr(manager_core, 'save_snapshot'):
-                    await manager_core.save_snapshot()
-                    print("[Comfy-Pack] Snapshot saved via ComfyUI-Manager")
+        import sys
+        for module_name, module in sys.modules.items():
+            if 'manager_core' in module_name and hasattr(module, 'get_current_snapshot'):
+                print("[Comfy-Pack] Calling ComfyUI-Manager's get_current_snapshot...")
+                snapshot = await module.get_current_snapshot(custom_nodes_only=False)
+                pips_count = len(snapshot.get('pips', {}) or {})
+                nodes_count = len(snapshot.get('git_custom_nodes', {}))
+                print(f"[Comfy-Pack] Snapshot generated: {nodes_count} custom nodes, {pips_count} pip packages")
+                return snapshot
     except Exception as e:
-        print(f"[Comfy-Pack] Direct snapshot save failed: {e}")
+        print(f"[Comfy-Pack] get_current_snapshot failed: {e}")
 
-    # Fallback: Try the route handler with a mock request
-    if not list(snapshot_path.glob("*.json")):
-        try:
-            save_snapshot_route = next(
-                (
-                    route
-                    for route in PromptServer.instance.routes
-                    if route.path == "/snapshot/save"
-                ),
-                None,
-            )
-            if save_snapshot_route:
-                # Create a minimal mock request
-                from aiohttp.test_utils import make_mocked_request
-                mock_request = make_mocked_request("GET", "/snapshot/save")
-                await save_snapshot_route.handler(mock_request)
-                print("[Comfy-Pack] Snapshot saved via route handler")
-        except Exception as e:
-            print(f"[Comfy-Pack] Route handler snapshot save failed: {e}")
+    # 方法3: 动态导入 manager_core 模块
+    try:
+        manager_path = Path(folder_paths.get_folder_paths("custom_nodes")[0]) / "ComfyUI-Manager" / "glob"
+        if manager_path.exists():
+            import sys
+            if str(manager_path) not in sys.path:
+                sys.path.insert(0, str(manager_path))
 
-    # Final fallback: Generate basic snapshot ourselves
-    if not list(snapshot_path.glob("*.json")):
-        try:
-            await _generate_basic_snapshot(snapshot_path)
-            print("[Comfy-Pack] Generated basic snapshot")
-        except Exception as e:
-            print(f"[Comfy-Pack] Basic snapshot generation failed: {e}")
+            import manager_core
+            print("[Comfy-Pack] Calling dynamically imported manager_core...")
+            snapshot = await manager_core.get_current_snapshot(custom_nodes_only=False)
+            pips_count = len(snapshot.get('pips', {}) or {})
+            nodes_count = len(snapshot.get('git_custom_nodes', {}))
+            print(f"[Comfy-Pack] Snapshot generated: {nodes_count} custom nodes, {pips_count} pip packages")
+            return snapshot
+    except Exception as e:
+        print(f"[Comfy-Pack] Dynamic import failed: {e}")
 
-    if not snapshot_path.exists():
-        raise RuntimeError(f"Snapshot directory does not exist: {snapshot_path}")
+    # 方法4: 最终回退 - 生成基本快照（无 pips 信息）
+    print("[Comfy-Pack] WARNING: Generating basic snapshot without pip info")
+    await _generate_basic_snapshot(snapshot_path)
 
     most_recent = max(
         snapshot_path.glob("*.json"), key=lambda x: x.stat().st_mtime, default=None
     )
     if not most_recent:
-        raise RuntimeError(f"No snapshot files found in {snapshot_path}. Please check ComfyUI-Manager installation.")
+        raise RuntimeError("Failed to generate snapshot")
     with most_recent.open("r") as f:
         return json.load(f)
 
@@ -182,7 +185,7 @@ async def _generate_basic_snapshot(snapshot_path: Path) -> None:
         "comfyui": "unknown",
         "git_custom_nodes": custom_nodes,
         "file_custom_nodes": [],
-        "pips": []
+        "pips": {}  # 字典格式，键为包名==版本，值为空字典
     }
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
