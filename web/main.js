@@ -337,12 +337,11 @@ async function packageAction() {
 
   try {
     downloadModal.addLog("开始准备工作流数据...", "info");
-    const { workflow, output: workflow_api } = await app.graphToPrompt();
+    const { workflow } = await app.graphToPrompt();
 
     downloadModal.addLog("工作流序列化完成", "info");
     const body = JSON.stringify({
       workflow,
-      workflow_api,
       files: [],  // 简化版：空文件列表，后端将自动处理所有文件
       filename: result.filename,  // Include filename for custom naming
       completion_message: result.completionMessage,  // Include completion message

@@ -208,8 +208,6 @@ async def _write_snapshot(path: ZPath, data: dict) -> None:
 
 async def _write_workflow(path: ZPath, data: dict) -> None:
     print("Package => Writing workflow")
-    with path.joinpath("workflow_api.json").open("w") as f:
-        f.write(json.dumps(data["workflow_api"], indent=2))
     with path.joinpath("workflow.json").open("w") as f:
         f.write(json.dumps(data["workflow"], indent=2))
 
