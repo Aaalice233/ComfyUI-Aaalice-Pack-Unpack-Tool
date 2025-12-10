@@ -669,17 +669,21 @@ class MainWindow(QMainWindow):
         """自动检测 Python 环境"""
         if not self.comfyui_dir:
             return
-        
+
         self.log("正在检测 Python 环境...", "#2196F3")
-        
+
         # 使用日志回调来输出详细的检测过程
         def log_callback(msg: str):
             self.log(msg, "#888888")
-        
-        python_paths = detect_python_environments(self.comfyui_dir, log_callback)
-        
+
+        try:
+            python_paths = detect_python_environments(self.comfyui_dir, log_callback)
+        except Exception as e:
+            self.log(f"检测 Python 时出错: {e}", "#F44336")
+            python_paths = []
+
         if not python_paths:
-            self.log("未检测到 Python 环境", "#FF9800")
+            self.log("未检测到 Python 环境（可手动选择）", "#FF9800")
             self.python_input.setText("未检测到")
             self.python_btn.setEnabled(True)
             self.python_exe = None
