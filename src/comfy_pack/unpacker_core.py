@@ -21,6 +21,140 @@ else:
 # 保存原始的 subprocess.run
 _original_subprocess_run = subprocess.run
 
+_PROXY_URL_CACHE: Optional[str] = None
+
+
+def _extract_proxy_hostport(proxy_value: str) -> str:
+    """将代理字符串标准化为 host:port。"""
+    value = (proxy_value or "").strip()
+    if not value:
+        return ""
+
+    # Windows 可能是 "http=host:port;https=host:port" 格式
+    if "=" in value:
+        parts = [p.strip() for p in value.split(";") if p.strip()]
+        protocol_map = {}
+        for part in parts:
+            if "=" not in part:
+                continue
+            key, v = part.split("=", 1)
+            protocol_map[key.strip().lower()] = v.strip()
+        for key in ("http", "https", "socks", "socks5"):
+            if protocol_map.get(key):
+                value = protocol_map[key]
+                break
+
+    # 去掉 URL scheme
+    for prefix in ("http://", "https://", "socks5://", "socks://"):
+        if value.lower().startswith(prefix):
+            value = value[len(prefix):]
+            break
+
+    # 去掉 user:pass@
+    if "@" in value:
+        value = value.split("@", 1)[1]
+
+    return value.strip().rstrip("/")
+
+
+def _detect_proxy_url_from_env() -> Optional[str]:
+    """从环境变量中读取代理地址并转成 URL。"""
+    for key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        raw = os.environ.get(key, "").strip()
+        if not raw:
+            continue
+        if "://" in raw:
+            return raw
+        host_port = _extract_proxy_hostport(raw)
+        if host_port:
+            return f"http://{host_port}"
+    return None
+
+
+def _detect_windows_system_proxy_url() -> Optional[str]:
+    """从 Windows 注册表读取系统代理配置。"""
+    if os.name != "nt":
+        return None
+    try:
+        import winreg  # type: ignore
+
+        reg_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            if int(enabled) != 1:
+                return None
+            proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            raw_proxy = str(proxy_server).strip()
+            scheme = "http"
+            value = raw_proxy
+
+            if "=" in raw_proxy:
+                parts = [p.strip() for p in raw_proxy.split(";") if p.strip()]
+                protocol_map = {}
+                for part in parts:
+                    if "=" not in part:
+                        continue
+                    k, v = part.split("=", 1)
+                    protocol_map[k.strip().lower()] = v.strip()
+                for k in ("http", "https", "socks5", "socks"):
+                    if protocol_map.get(k):
+                        scheme = k
+                        value = protocol_map[k]
+                        break
+
+            host_port = _extract_proxy_hostport(value)
+            if not host_port:
+                return None
+            if scheme in ("socks", "socks5"):
+                return f"socks5://{host_port}"
+            return f"http://{host_port}"
+    except Exception:
+        return None
+
+
+def get_effective_proxy_url() -> Optional[str]:
+    """获取当前进程可用的代理 URL（优先环境变量，再系统代理）。"""
+    global _PROXY_URL_CACHE
+    if _PROXY_URL_CACHE is not None:
+        return _PROXY_URL_CACHE or None
+
+    proxy_url = _detect_proxy_url_from_env()
+    if not proxy_url:
+        proxy_url = _detect_windows_system_proxy_url()
+
+    _PROXY_URL_CACHE = proxy_url or ""
+    return proxy_url
+
+
+def _inject_proxy_env(env: dict) -> dict:
+    """为子进程注入代理环境变量。"""
+    proxy_url = get_effective_proxy_url()
+    if not proxy_url:
+        return env
+
+    is_socks = proxy_url.lower().startswith(("socks5://", "socks://"))
+
+    # 用户显式设置的变量优先，未设置时才注入系统代理。
+    if is_socks:
+        for key in ("ALL_PROXY", "all_proxy"):
+            if not env.get(key):
+                env[key] = proxy_url
+    else:
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            if not env.get(key):
+                env[key] = proxy_url
+
+    if not env.get("NO_PROXY") and not env.get("no_proxy"):
+        env["NO_PROXY"] = "localhost,127.0.0.1,::1"
+    return env
+
 
 def run_subprocess(*args, **kwargs):
     """
@@ -29,11 +163,13 @@ def run_subprocess(*args, **kwargs):
     # 只在 Windows 上添加 creationflags 参数
     if sys.platform == 'win32' and 'creationflags' not in kwargs:
         kwargs['creationflags'] = SUBPROCESS_FLAGS
+    env = kwargs.get("env")
+    if env is None:
+        env = os.environ.copy()
+    else:
+        env = dict(env)
+    kwargs["env"] = _inject_proxy_env(env)
     return _original_subprocess_run(*args, **kwargs)
-
-
-# 替换 subprocess.run 为我们的包装函数，自动隐藏窗口
-subprocess.run = run_subprocess
 
 
 # 插件排除列表：这些插件不会被解包器处理（避免exe被占用导致异常）
@@ -71,39 +207,36 @@ def check_github_connection(timeout: int = 10) -> Tuple[bool, str]:
     Returns:
         (是否可连接, 错误信息)
     """
-    import socket
     import urllib.request
     import urllib.error
 
     test_urls = [
-        ('github.com', 443),
-        ('raw.githubusercontent.com', 443),
+        "https://api.github.com",
+        "https://github.com",
     ]
 
-    # 先尝试 socket 连接
-    for host, port in test_urls:
+    # 优先使用 HTTP 请求（可经系统代理）
+    proxy_env = _inject_proxy_env(os.environ.copy())
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler(
+            {
+                "http": proxy_env.get("HTTP_PROXY") or proxy_env.get("http_proxy"),
+                "https": proxy_env.get("HTTPS_PROXY") or proxy_env.get("https_proxy"),
+            }
+        )
+    )
+    for url in test_urls:
         try:
-            socket.setdefaulttimeout(timeout)
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            result = sock.connect_ex((host, port))
-            sock.close()
-            if result == 0:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with opener.open(req, timeout=timeout):
                 return True, ""
-        except socket.gaierror:
-            return False, f"无法解析域名 {host}"
-        except socket.timeout:
-            return False, f"连接 {host} 超时"
-        except Exception as e:
+        except Exception:
             continue
 
-    # 如果 socket 都失败，尝试 HTTP 请求
     try:
-        req = urllib.request.Request(
-            'https://github.com',
-            headers={'User-Agent': 'Mozilla/5.0'}
-        )
-        urllib.request.urlopen(req, timeout=timeout)
+        req = urllib.request.Request("https://raw.githubusercontent.com", headers={"User-Agent": "Mozilla/5.0"})
+        with opener.open(req, timeout=timeout):
+            pass
         return True, ""
     except urllib.error.URLError as e:
         return False, f"网络请求失败: {e.reason}"
@@ -221,7 +354,7 @@ def detect_python_environments(comfyui_dir: Path, log_callback=None) -> List[Pat
         log("3. 检查全局 Python...")
         try:
             if is_windows:
-                result = subprocess.run(
+                result = run_subprocess(
                     ["where", "python"],
                     capture_output=True,
                     text=True,
@@ -236,7 +369,7 @@ def detect_python_environments(comfyui_dir: Path, log_callback=None) -> List[Pat
             else:
                 # Linux - 优先查找 python3
                 for py_cmd in ["python3", "python"]:
-                    result = subprocess.run(
+                    result = run_subprocess(
                         ["which", py_cmd],
                         capture_output=True,
                         text=True,
@@ -290,7 +423,7 @@ def detect_git_executable(comfyui_dir: Path) -> Optional[Path]:
     try:
         # Windows
         if os.name == "nt":
-            result = subprocess.run(
+            result = run_subprocess(
                 ["where", "git"],
                 capture_output=True,
                 text=True,
@@ -302,7 +435,7 @@ def detect_git_executable(comfyui_dir: Path) -> Optional[Path]:
                     return git_path
         else:
             # Linux/Mac
-            result = subprocess.run(
+            result = run_subprocess(
                 ["which", "git"],
                 capture_output=True,
                 text=True,
@@ -321,7 +454,7 @@ def detect_git_executable(comfyui_dir: Path) -> Optional[Path]:
 def get_installed_packages(python_exe: Path) -> Dict[str, str]:
     """获取已安装的包列表和版本"""
     try:
-        result = subprocess.run(
+        result = run_subprocess(
             [str(python_exe), "-m", "pip", "list", "--format=json"],
             capture_output=True,
             text=True,
@@ -357,7 +490,7 @@ def get_installed_plugins(comfyui_dir: Path, git_exe: Optional[Path] = None) -> 
         
         try:
             # 获取当前 commit
-            result = subprocess.run(
+            result = run_subprocess(
                 [git_cmd, "rev-parse", "HEAD"],
                 cwd=item,
                 capture_output=True,
@@ -370,7 +503,7 @@ def get_installed_plugins(comfyui_dir: Path, git_exe: Optional[Path] = None) -> 
             commit = result.stdout.strip()
             
             # 获取 remote URL
-            url_result = subprocess.run(
+            url_result = run_subprocess(
                 [git_cmd, "remote", "get-url", "origin"],
                 cwd=item,
                 capture_output=True,
@@ -382,7 +515,9 @@ def get_installed_plugins(comfyui_dir: Path, git_exe: Optional[Path] = None) -> 
             
             # 标准化 URL（移除 .git 后缀，统一 https/git 格式）
             if url:
-                url = url.rstrip('/').rstrip('.git')
+                url = url.rstrip('/')
+                if url.lower().endswith(".git"):
+                    url = url[:-4]
                 url = url.replace('git@github.com:', 'https://github.com/')
             
             plugins[item.name] = {
@@ -437,10 +572,12 @@ def switch_comfyui_version(
         是否成功
     """
     git_cmd = str(git_exe) if git_exe else "git"
+    stash_name = f"comfy-pack-auto-stash-{target_commit[:8]}"
+    stash_created = False
     
     # 检查是否有未提交的更改
     try:
-        result = subprocess.run(
+        result = run_subprocess(
             [git_cmd, "status", "--porcelain"],
             cwd=comfyui_dir,
             capture_output=True,
@@ -451,13 +588,20 @@ def switch_comfyui_version(
             if log_callback:
                 log_callback("  警告: ComfyUI 目录有未提交的更改，将暂存这些更改")
             
-            # 暂存更改
-            subprocess.run(
-                [git_cmd, "stash"],
+            # 暂存更改并记录标记，后续自动尝试恢复
+            stash_result = run_subprocess(
+                [git_cmd, "stash", "push", "-u", "-m", stash_name],
                 cwd=comfyui_dir,
                 capture_output=True,
+                text=True,
                 timeout=30
             )
+            if stash_result.returncode == 0:
+                output = (stash_result.stdout or "") + (stash_result.stderr or "")
+                # "No local changes to save" 时不会创建 stash
+                stash_created = "No local changes to save" not in output
+                if stash_created and log_callback:
+                    log_callback("  ✓ 已暂存本地改动，完成后将自动恢复")
     except Exception as e:
         if log_callback:
             log_callback(f"  警告: 检查 git 状态失败: {e}")
@@ -467,7 +611,7 @@ def switch_comfyui_version(
         if log_callback:
             log_callback(f"  切换到 commit: {target_commit[:8]}")
         
-        result = subprocess.run(
+        result = run_subprocess(
             [git_cmd, "checkout", target_commit],
             cwd=comfyui_dir,
             capture_output=True,
@@ -482,6 +626,35 @@ def switch_comfyui_version(
         
         if log_callback:
             log_callback(f"  ✓ 成功切换到版本: {target_commit[:8]}")
+
+        if stash_created:
+            pop_result = run_subprocess(
+                [git_cmd, "stash", "list"],
+                cwd=comfyui_dir,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if pop_result.returncode == 0 and stash_name in (pop_result.stdout or ""):
+                apply_result = run_subprocess(
+                    [git_cmd, "stash", "apply", f"stash^{{/{stash_name}}}"],
+                    cwd=comfyui_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if apply_result.returncode == 0:
+                    run_subprocess(
+                        [git_cmd, "stash", "drop", f"stash^{{/{stash_name}}}"],
+                        cwd=comfyui_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    if log_callback:
+                        log_callback("  ✓ 已恢复暂存的本地改动")
+                elif log_callback:
+                    log_callback("  ⚠ 自动恢复改动失败，请手动执行: git stash list / git stash apply")
         
         return True
         
@@ -553,7 +726,9 @@ def check_plugin_versions(
     # 标准化 URL 的辅助函数
     def normalize_url(url: str) -> str:
         """标准化 Git URL 用于比较"""
-        url = url.strip().rstrip('/').rstrip('.git')
+        url = url.strip().rstrip('/')
+        if url.lower().endswith(".git"):
+            url = url[:-4]
         url = url.replace('git@github.com:', 'https://github.com/')
         return url.lower()
     
@@ -885,7 +1060,11 @@ def install_or_update_plugins(
     custom_nodes = comfyui_dir / "custom_nodes"
     custom_nodes.mkdir(exist_ok=True)
     
-    all_tasks = plugins_diff['to_install'] + plugins_diff['to_update']
+    all_tasks = [
+        {**task, "_action": "install"} for task in plugins_diff['to_install']
+    ] + [
+        {**task, "_action": "update"} for task in plugins_diff['to_update']
+    ]
     total = len(all_tasks)
     
     if total == 0:
@@ -923,7 +1102,7 @@ def install_or_update_plugins(
             progress_callback(idx, total, plugin_name)
         
         try:
-            if task in plugins_diff['to_install']:
+            if task.get("_action") == "install":
                 # 标记为"需要安装"的插件
                 # 检查目录是否已存在
                 if plugin_dir.exists():
@@ -935,7 +1114,7 @@ def install_or_update_plugins(
                             log_callback(f"  检查插件 Git 仓库: {plugin_name}")
                         
                         # 先检查当前是否已经是目标版本
-                        current_commit_result = subprocess.run(
+                        current_commit_result = run_subprocess(
                             [git_cmd, "rev-parse", "HEAD"],
                             cwd=plugin_dir,
                             capture_output=True,
@@ -973,7 +1152,7 @@ def install_or_update_plugins(
                         if log_callback:
                             log_callback(f"    [步骤1] 尝试直接 checkout...")
                         
-                        result = subprocess.run(
+                        result = run_subprocess(
                             [git_cmd, "checkout", task['commit']],
                             cwd=plugin_dir,
                             capture_output=True,
@@ -994,7 +1173,7 @@ def install_or_update_plugins(
                                 log_callback(f"    [步骤2] 执行 fetch --all --tags...")
                             
                             # 策略1: 先尝试 fetch 所有远程分支和标签
-                            fetch_result = subprocess.run(
+                            fetch_result = run_subprocess(
                                 [git_cmd, "fetch", "--all", "--tags"],
                                 cwd=plugin_dir,
                                 capture_output=True,
@@ -1013,7 +1192,7 @@ def install_or_update_plugins(
                             if log_callback:
                                 log_callback(f"    [步骤3] 再次尝试 checkout...")
                             
-                            result = subprocess.run(
+                            result = run_subprocess(
                                 [git_cmd, "checkout", task['commit']],
                                 cwd=plugin_dir,
                                 capture_output=True,
@@ -1033,7 +1212,7 @@ def install_or_update_plugins(
                                     log_callback(f"    ✗ 仍然失败")
                                     log_callback(f"    [步骤4] 尝试 fetch origin {task['commit'][:8]}...")
                                 
-                                fetch_result = subprocess.run(
+                                fetch_result = run_subprocess(
                                     [git_cmd, "fetch", "origin", task['commit']],
                                     cwd=plugin_dir,
                                     capture_output=True,
@@ -1052,7 +1231,7 @@ def install_or_update_plugins(
                                 if log_callback:
                                     log_callback(f"    [步骤5] 第三次尝试 checkout...")
                                 
-                                result = subprocess.run(
+                                result = run_subprocess(
                                     [git_cmd, "checkout", task['commit']],
                                     cwd=plugin_dir,
                                     capture_output=True,
@@ -1072,7 +1251,7 @@ def install_or_update_plugins(
                                         log_callback(f"    ✗ 仍然失败")
                                         log_callback(f"    [步骤6] 尝试 fetch --unshallow（获取完整历史）...")
                                     
-                                    unshallow_result = subprocess.run(
+                                    unshallow_result = run_subprocess(
                                         [git_cmd, "fetch", "--unshallow"],
                                         cwd=plugin_dir,
                                         capture_output=True,
@@ -1092,7 +1271,7 @@ def install_or_update_plugins(
                                     if log_callback:
                                         log_callback(f"    [步骤7] 最后一次尝试 checkout...")
                                     
-                                    result = subprocess.run(
+                                    result = run_subprocess(
                                         [git_cmd, "checkout", task['commit']],
                                         cwd=plugin_dir,
                                         capture_output=True,
@@ -1116,7 +1295,7 @@ def install_or_update_plugins(
                                         # 尝试更新到主分支最新版本
                                         main_branch = None
                                         for branch_name in ['main', 'master']:
-                                            check_result = subprocess.run(
+                                            check_result = run_subprocess(
                                                 [git_cmd, "rev-parse", "--verify", f"origin/{branch_name}"],
                                                 cwd=plugin_dir,
                                                 capture_output=True,
@@ -1128,7 +1307,7 @@ def install_or_update_plugins(
 
                                         if main_branch:
                                             # checkout 到主分支
-                                            checkout_main = subprocess.run(
+                                            checkout_main = run_subprocess(
                                                 [git_cmd, "checkout", main_branch],
                                                 cwd=plugin_dir,
                                                 capture_output=True,
@@ -1138,7 +1317,7 @@ def install_or_update_plugins(
 
                                             if checkout_main.returncode == 0:
                                                 # reset 到远程最新版本
-                                                reset_result = subprocess.run(
+                                                reset_result = run_subprocess(
                                                     [git_cmd, "reset", "--hard", f"origin/{main_branch}"],
                                                     cwd=plugin_dir,
                                                     capture_output=True,
@@ -1181,7 +1360,7 @@ def install_or_update_plugins(
                         if log_callback:
                             log_callback(f"    克隆仓库: {task['url'][:60]}...")
                         
-                        result = subprocess.run(
+                        result = run_subprocess(
                             [git_cmd, "clone", task['url'], str(plugin_dir)],
                             capture_output=True,
                             text=True,
@@ -1204,7 +1383,7 @@ def install_or_update_plugins(
                             log_callback(f"    切换到 commit: {task['commit'][:8]}")
                         
                         # Checkout 到指定版本
-                        checkout_result = subprocess.run(
+                        checkout_result = run_subprocess(
                             [git_cmd, "checkout", task['commit']],
                             cwd=plugin_dir,
                             capture_output=True,
@@ -1233,7 +1412,7 @@ def install_or_update_plugins(
                         log_callback(f"  全新安装: {plugin_name}")
                         log_callback(f"    克隆仓库: {task['url'][:60]}...")
                     
-                    result = subprocess.run(
+                    result = run_subprocess(
                         [git_cmd, "clone", task['url'], str(plugin_dir)],
                         capture_output=True,
                         text=True,
@@ -1255,7 +1434,7 @@ def install_or_update_plugins(
                         log_callback(f"    ✓ 克隆完成")
                         log_callback(f"    切换到 commit: {task['commit'][:8]}")
                     
-                    checkout_result = subprocess.run(
+                    checkout_result = run_subprocess(
                         [git_cmd, "checkout", task['commit']],
                         cwd=plugin_dir,
                         capture_output=True,
@@ -1293,7 +1472,7 @@ def install_or_update_plugins(
                 if force_update:
                     # 强制更新到最新版本
                     # 1. 先 fetch 最新代码
-                    fetch_result = subprocess.run(
+                    fetch_result = run_subprocess(
                         [git_cmd, "fetch", "origin"],
                         cwd=plugin_dir,
                         capture_output=True,
@@ -1314,7 +1493,7 @@ def install_or_update_plugins(
                     # 2. 切换到主分支
                     main_branch = None
                     for branch_name in ['main', 'master']:
-                        check_result = subprocess.run(
+                        check_result = run_subprocess(
                             [git_cmd, "rev-parse", "--verify", f"origin/{branch_name}"],
                             cwd=plugin_dir,
                             capture_output=True,
@@ -1326,7 +1505,7 @@ def install_or_update_plugins(
                     
                     if main_branch:
                         # 3. checkout 到主分支
-                        checkout_result = subprocess.run(
+                        checkout_result = run_subprocess(
                             [git_cmd, "checkout", main_branch],
                             cwd=plugin_dir,
                             capture_output=True,
@@ -1336,7 +1515,7 @@ def install_or_update_plugins(
                         
                         if checkout_result.returncode == 0:
                             # 4. reset 到远程最新版本
-                            reset_result = subprocess.run(
+                            reset_result = run_subprocess(
                                 [git_cmd, "reset", "--hard", f"origin/{main_branch}"],
                                 cwd=plugin_dir,
                                 capture_output=True,
@@ -1359,7 +1538,7 @@ def install_or_update_plugins(
                 else:
                     # 正常更新到指定 commit
                     # Fetch 新的 commit
-                    fetch_result = subprocess.run(
+                    fetch_result = run_subprocess(
                         [git_cmd, "fetch", "origin", task['target_full']],
                         cwd=plugin_dir,
                         capture_output=True,
@@ -1382,7 +1561,7 @@ def install_or_update_plugins(
                         log_callback(f"    执行 checkout...")
                     
                     # Checkout 到指定 commit
-                    checkout_result = subprocess.run(
+                    checkout_result = run_subprocess(
                         [git_cmd, "checkout", task['target_full']],
                         cwd=plugin_dir,
                         capture_output=True,
@@ -1412,7 +1591,7 @@ def install_or_update_plugins(
                 if log_callback:
                     log_callback(f"    运行安装脚本 install.py...")
                 
-                install_result = subprocess.run(
+                install_result = run_subprocess(
                     [str(python_exe), "install.py"],
                     cwd=plugin_dir,
                     capture_output=True,
@@ -1498,7 +1677,7 @@ def install_or_update_plugins(
             try:
                 # 修复可能的游离状态
                 # 先获取当前 commit
-                result = subprocess.run(
+                result = run_subprocess(
                     [git_cmd, "rev-parse", "HEAD"],
                     cwd=plugin_dir,
                     capture_output=True,
@@ -1580,7 +1759,7 @@ def install_dependencies_to_existing(
             if log_callback:
                 log_callback(f"执行: pip install --upgrade {' '.join(standard_packages[:3])}{'...' if len(standard_packages) > 3 else ''}")
             
-            result = subprocess.run(
+            result = run_subprocess(
                 cmd,
                 capture_output=True,
                 text=True,
@@ -1707,6 +1886,11 @@ def unpack_to_existing_comfyui(
         log_callback(f"压缩包: {cpack_path}")
         log_callback(f"目标目录: {comfyui_dir}")
         log_callback(f"Python: {python_exe}")
+        proxy_url = get_effective_proxy_url()
+        if proxy_url:
+            log_callback(f"网络代理: {proxy_url}")
+        else:
+            log_callback("网络代理: 未检测到")
         log_callback("=" * 50)
 
     # 检查网络连接

@@ -68,9 +68,9 @@ build.bat
 ## 技术细节
 
 - **GUI 框架**: PySide6 (Qt6)
-- **Git 操作**: GitPython
+- **Git 操作**: Git 可执行文件（子进程调用）
 - **打包工具**: PyInstaller
-- **文件大小**: 约 80-120MB
+- **文件大小**: 约 40-80MB（取决于构建环境与 UPX）
 
 ## 开发者
 
