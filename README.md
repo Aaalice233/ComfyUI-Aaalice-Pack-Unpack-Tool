@@ -1,3 +1,12 @@
+> [!CAUTION]
+> ### 🚚 项目已迁移 / Project Migrated
+>
+> 本仓库已停止新功能开发，仅保留历史代码与文档。相关功能及后续更新已迁移至 **[ComfyUI-Aaalice-Workflow-Hub](https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub)**，请前往新项目安装和使用。
+>
+> This repository no longer receives new features and is retained for historical reference only. Ongoing development has moved to **[ComfyUI-Aaalice-Workflow-Hub](https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub)**.
+>
+> 新版工作流：**[Aaalice-Workflows](https://github.com/Aaalice233/Aaalice-Workflows)** · 配套节点：**[ComfyUI-Aaalice-Nodes](https://github.com/Aaalice233/ComfyUI-Aaalice-Nodes)**
+
 # ComfyUI-Aaalice-Pack-Unpack-Tool
 
 ![banner2](https://github.com/user-attachments/assets/14a7e469-6683-4818-9d54-5e5a8d0aa454)
